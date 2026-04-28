@@ -12,6 +12,7 @@ The compilation pipeline transforms those rules into model-layer constructs.
 Those constructs include optimized VLAN assignments, connection tagging, node outbound and inbound tags, and scoped segments.
 
 The compiler uses a default-allow model: policied sources are forced onto their assigned VLAN, while unpolicied sources produce on tag 0.
+All tags — including tag 0 — use the same directed reachability analysis, so a connection only carries tags whose sources can actually reach it.
 All sink nodes accept every active VLAN plus tag 0, so both policied and unpolicied power can reach any destination.
 Only sources with explicit policies receive non-zero tags, minimizing LP variable growth.
 
@@ -49,7 +50,7 @@ This yields the minimum VLAN count for correct policy behavior.
 
 ### Step 4: Reachability analysis
 
-For each VLAN, find connections on directed paths from source nodes to *any* sink node — not just the policy's explicit destinations.
+For each tag (including the default tag), find connections on directed paths from source nodes to *any* sink node — not just the policy's explicit destinations.
 Forward reachability follows connection direction (source → target); backward reachability follows reverse direction (target → source).
 Only connections whose endpoints appear in both the forward and backward reachable sets receive variables for that VLAN.
 This directed approach prevents tags from leaking onto adjacent connections not on a valid source-to-sink path.
@@ -71,7 +72,9 @@ Without this exclusion the solver could use solar (or any other incoming VLAN) j
 
 ### Step 5: Connection tagging
 
-Apply reachability results so each connection gets the set of VLANs that can traverse it.
+Apply reachability results so each connection gets the set of tags that can traverse it.
+The default tag uses the same reachability analysis as VLANs, with unpolicied source nodes as its starting set.
+Connections only reachable from policied sources do not carry the default tag, avoiding redundant LP variables.
 
 ### Step 6: Node outbound tags
 

@@ -11,12 +11,14 @@ Implements the full compilation pipeline:
 8. Pricing injection — per-VLAN sink-side minimum s-t cut placement as
    PolicyPricing model elements with reactive TrackedParam prices
 
-Default-allow model: unpolicied sources produce on tag 0 (the default tag),
-which all connections carry. Policied sources are forced onto their VLAN by
-outbound_tags. Sink nodes accept all active VLANs plus tag 0, so both
-policied and unpolicied power can reach any sink. Costs are applied by
-PolicyPricing elements placed on the min-cut edges separating sources from
-policy-specific destinations.
+Default-allow model: unpolicied sources produce on tag 0 (the default tag).
+Policied sources are forced onto their VLAN by outbound_tags. All tags —
+including tag 0 — use the same directed reachability analysis, so a
+connection only carries the tags whose sources can actually reach it.
+Sink nodes accept all active VLANs plus tag 0, so both policied and
+unpolicied power can reach any sink. Costs are applied by PolicyPricing
+elements placed on the min-cut edges separating sources from policy-specific
+destinations.
 
 See docs/modeling/tagged-power.md for design rationale.
 See docs/developer-guide/vlan-optimization.md for optimization proofs.
@@ -173,9 +175,9 @@ def compile_policies(
     active_vlans = sorted({v for v in tag_map.values() if v != DEFAULT_TAG})
 
     # --- Step 4: Reachability analysis ---
-    # VLAN membership follows source provenance: a VLAN covers every
-    # connection on a directed path from the VLAN's sources to *any* sink,
-    # stopping at each sink (sinks absorb the VLAN).
+    # Tag membership follows source provenance: a tag covers every
+    # connection on a directed path from the tag's sources to *any* sink,
+    # stopping at each sink (sinks absorb the tag).
     #
     # Reaching every sink (not just policy destinations) is necessary so
     # excess flow has somewhere to go without detouring or being curtailed
@@ -186,20 +188,35 @@ def compile_policies(
     # zero-wear arbitrage loops against tag-scoped prices. Pricing is
     # still only placed on the cut separating source from policy-specific
     # destinations (step 8); non-destination sinks remain policy-free.
-    vlan_connections: dict[int, set[str]] = {}
+    tag_connections: dict[int, set[str]] = {}
+
+    # Default tag uses the same reachability as VLANs — unpolicied sources
+    # produce on tag 0, so only connections reachable from those sources
+    # carry the default tag. This avoids redundant LP variables on
+    # connections only reachable from policied sources.
+    default_tag_sources = {n for n in source_names if tag_map.get(n, DEFAULT_TAG) == DEFAULT_TAG}
+    if default_tag_sources:
+        tag_connections[DEFAULT_TAG] = _find_reachable_connections(
+            default_tag_sources, sink_names, directed_graph, absorb_at=sink_names
+        )
+
     for vlan_id in active_vlans:
         source_nodes = {n for n, v in tag_map.items() if v == vlan_id}
-        vlan_connections[vlan_id] = _find_reachable_connections(
+        tag_connections[vlan_id] = _find_reachable_connections(
             source_nodes, sink_names, directed_graph, absorb_at=sink_names
         )
 
     # --- Step 5: Connection tagging ---
+    # Each connection carries only tags whose sources can reach it via
+    # directed paths. Falls back to DEFAULT_TAG for connections not on
+    # any source-to-sink path (should not occur in well-formed networks).
     for conn in connections:
-        tags: set[int] = {DEFAULT_TAG}
-        for vlan_id in active_vlans:
-            if conn["name"] in vlan_connections.get(vlan_id, set()):
-                tags.add(vlan_id)
-        conn["tags"] = tags
+        tags = {
+            tag_id
+            for tag_id, reachable in tag_connections.items()
+            if conn["name"] in reachable
+        }
+        conn["tags"] = tags or {DEFAULT_TAG}
 
     # --- Step 6: Node outbound tags ---
     # Policied sources produce on their VLAN. Unpolicied source-capable nodes
