@@ -49,7 +49,7 @@ def serialize_topology(
                 "segments": segments,
             }
             tags = element.connection_tags()
-            if tags != {0}:
+            if tags and tags != {0}:
                 edge_data["tags"] = sorted(tags)
             edges.append(edge_data)
 

@@ -11,10 +11,10 @@ Users configure source-destination pairs with prices and limits.
 The compilation pipeline transforms those rules into model-layer constructs.
 Those constructs include optimized VLAN assignments, connection tagging, node outbound and inbound tags, and scoped segments.
 
-The compiler uses a default-allow model: policied sources are forced onto their assigned VLAN, while unpolicied sources produce on tag 0.
-All tags — including tag 0 — use the same directed reachability analysis, so a connection only carries tags whose sources can actually reach it.
-All sink nodes accept every active VLAN plus tag 0, so both policied and unpolicied power can reach any destination.
-Only sources with explicit policies receive non-zero tags, minimizing LP variable growth.
+Every source-capable node receives a VLAN through signature merging.
+Policied sources get VLANs based on their rule signatures; unpolicied sources share a single VLAN (the empty-signature group) with no pricing elements.
+All VLANs use the same directed reachability analysis, so a connection only carries tags whose sources can actually reach it.
+All sink nodes accept every active VLAN so both policied and unpolicied power can reach any destination.
 
 ## Pipeline
 
@@ -50,7 +50,7 @@ This yields the minimum VLAN count for correct policy behavior.
 
 ### Step 4: Reachability analysis
 
-For each tag (including the default tag), find connections on directed paths from source nodes to *any* sink node — not just the policy's explicit destinations.
+For each VLAN, find connections on directed paths from that VLAN's source nodes to *any* sink node — not just the policy's explicit destinations.
 Forward reachability follows connection direction (source → target); backward reachability follows reverse direction (target → source).
 Only connections whose endpoints appear in both the forward and backward reachable sets receive variables for that VLAN.
 This directed approach prevents tags from leaking onto adjacent connections not on a valid source-to-sink path.
@@ -73,19 +73,17 @@ Without this exclusion the solver could use solar (or any other incoming VLAN) j
 ### Step 5: Connection tagging
 
 Apply reachability results so each connection gets the set of tags that can traverse it.
-The default tag uses the same reachability analysis as VLANs, with unpolicied source nodes as its starting set.
-Connections only reachable from policied sources do not carry the default tag, avoiding redundant LP variables.
+Every VLAN — including the unpolicied VLAN — uses the same reachability analysis.
 
 ### Step 6: Node outbound tags
 
-Set `outbound_tags` on each source node with an assigned VLAN.
-The node's `element_power_balance` constraint enforces that only the outbound tags carry produced power.
+Set `outbound_tags` on every source node.
+Each source is forced onto its assigned VLAN by `element_power_balance`.
 
 ### Step 7: Node inbound tags
 
 Set `inbound_tags` on each sink node.
-All sinks accept tag 0 (unpolicied power) plus all active policy VLANs.
-This default-allow approach ensures both policied and unpolicied power can reach any sink.
+All sinks accept every active VLAN so both policied and unpolicied power can reach any sink.
 
 Junction nodes (neither source nor sink) do not receive inbound tags.
 Power on any VLAN can still flow through junction nodes for routing.
@@ -139,15 +137,15 @@ Policies:
 | ---------------- | ------------------------------------------------------------------------------- |
 | Flow enumeration | {(Grid,Load,0.05), (Solar,Load,0.02)}                                           |
 | Signatures       | Grid and Solar have different signatures; others have empty signatures          |
-| VLANs            | Grid=1, Solar=2, others stay on tag 0                                           |
-| Reachability     | VLAN 1 on connections from Grid to every sink; VLAN 2 on connections from Solar |
+| VLANs            | Grid=1, Solar=2, Battery=3 (unpolicied sources share a VLAN)                    |
+| Reachability     | Each VLAN covers connections from its sources to every sink                     |
 | Connection tags  | Each connection carries only VLANs for paths through it                         |
-| Outbound tags    | Grid emits VLAN 1, Solar emits VLAN 2, Battery emits tag 0                      |
-| Inbound tags     | Load accepts tag 0, VLAN 1, and VLAN 2                                          |
+| Outbound tags    | Grid emits VLAN 1, Solar emits VLAN 2, Battery emits VLAN 3                     |
+| Inbound tags     | Load accepts VLAN 1, VLAN 2, and VLAN 3                                         |
 | Pricing          | Min-cut for each VLAN is SW→Load: pricing(tag=1,$0.05) and pricing(tag=2,$0.02) |
 
 Result: Solar power is preferred over grid power because it has lower policy cost.
-Battery power flows freely on tag 0 at zero policy cost.
+Battery power flows freely at zero policy cost (its VLAN has no pricing elements).
 
 ## Testing
 
@@ -156,9 +154,9 @@ Tests live in `custom_components/haeo/core/adapters/tests/test_policy_compilatio
 - **Signature computation**: correct signatures from explicit policies only.
 - **VLAN assignment**: only policied sources get non-zero VLANs.
 - **Reachability**: directed connection tagging for tree topologies.
-- **Source enforcement**: `outbound_tags` set on policied sources and unpolicied source-capable nodes.
-- **Default-allow**: unpolicied sources flow to policied destinations at zero cost on tag 0.
-- **No bypass**: policied sources cannot avoid policy costs via tag 0.
+- **Source enforcement**: `outbound_tags` set on every source node.
+- **Default-allow**: unpolicied sources flow to policied destinations at zero cost (no pricing elements on their VLAN).
+- **No bypass**: policied sources cannot avoid policy costs by flowing on another VLAN.
 - **End-to-end**: full network optimization with policies produces correct costs.
 
 ## Related

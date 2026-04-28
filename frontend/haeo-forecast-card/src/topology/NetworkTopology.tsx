@@ -24,9 +24,9 @@ const SEGMENT_ICONS: Record<string, string> = {
   TagPricingSegment: "🏷",
 };
 
-/** Distinct colors for VLAN tags. Tag 0 (default) is neutral gray. */
+/** Distinct colors for VLAN tags. Index 0 is unused (reserved). */
 const VLAN_COLORS: string[] = [
-  "#888", // tag 0 — default/untagged
+  "#888", // index 0 — reserved/fallback
   "#E91E63", // tag 1 — pink
   "#2196F3", // tag 2 — blue
   "#4CAF50", // tag 3 — green

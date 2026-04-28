@@ -94,8 +94,9 @@ class Connection[TOutputName: str](Element[TOutputName]):
         self._segments: OrderedDict[str, Segment] = OrderedDict()
 
         # Per-tag power flows (set during initialization)
-        # Default to a single tag (0) when no tags specified — always-tagged paradigm
-        self._tags: set[int] = set(tags) if tags else {0}
+        # When no tags are provided (no policy compilation), a single tag is
+        # used so the connection has one flow variable per period.
+        self._tags: set[int] = set(tags) if tags is not None else {0}
         self._power_in: dict[int, HighspyArray] = {}
         self._power_out: dict[int, HighspyArray] = {}
 

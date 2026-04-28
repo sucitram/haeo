@@ -36,18 +36,19 @@ Their combination determines how tags flow through the node.
 - A node with neither capability is a *junction* that passes every tag through unchanged.
 
 The operative rule is **a sink terminates every tag that is not its own**.
-Tagged flow that reaches a sink is consumed there; any power that continues onward from the same node re-originates under a new tag determined by that node's own source capability, or under the default tag if it has none.
+Tagged flow that reaches a sink is consumed there; any power that continues onward from the same node re-originates under a new tag determined by that node's own source capability.
 
 This rule constrains the subgraph over which a policy can apply prices.
 A policy extends only through the subgraph reachable from its sources up to the nearest sinks.
 Intermediate sinks absorb the tag, and legs downstream of such a sink fall under the provenance of that intermediate node instead.
 For a tag to traverse a routing node on its way to a downstream destination, the routing node must therefore be a junction.
 
-### Default-allow model
+### Uniform tagging model
 
-In the absence of any policy, every connection carries a single default tag and the formulation coincides with the untagged LP.
-Introducing policies adds tags only where provenance is distinguishable; unpolicied flow continues on the default tag at zero policy cost.
-Sinks admit both default-tagged flow and every active policy tag, so adding a policy cannot make a previously-feasible schedule infeasible.
+Every source-capable node receives a VLAN through signature merging.
+In the absence of any policy, all sources share a single VLAN and the formulation coincides with the untagged LP.
+Introducing policies adds VLANs only where provenance is distinguishable; unpolicied sources share a VLAN with no pricing elements, so their flow carries zero policy cost.
+Sinks admit every active VLAN, so adding a policy cannot make a previously-feasible schedule infeasible.
 
 ### Policy stacking
 
@@ -113,7 +114,7 @@ Translating a policy set into the LP constructs above has three algorithmic stag
 
 Each source is summarised by its *policy signature*: the set of destination-price tuples in which it participates.
 Sources with identical signatures receive identical downstream treatment and are merged to share a tag; sources with distinct signatures require distinct tags.
-The resulting tag count is the number of distinct non-empty signatures plus one default tag, which is the provable minimum required to keep every policy distinguishable.
+The resulting tag count is the number of distinct signatures (including the empty signature shared by unpolicied sources), which is the provable minimum required to keep every policy distinguishable.
 
 ### Reachability with absorbing sinks and source exclusion
 

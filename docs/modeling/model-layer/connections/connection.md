@@ -30,7 +30,7 @@ The Connection creates per-tag LP variables for the input power flow — one per
 | --------------------- | ----------------------- | ----------------------------------------- |
 | $P_{\\text{in},k}(t)$ | $\\mathbb{R}_{\\geq 0}$ | Power entering the connection for tag $k$ |
 
-When no tags are specified, a single default tag is used (always-tagged paradigm).
+When no tags are specified, a single tag is used so the connection has one flow variable per period.
 
 Segments do **not** create their own variables (except SOC pricing, which creates auxiliary slack variables).
 Instead, the Connection passes its power variables through the segment chain.

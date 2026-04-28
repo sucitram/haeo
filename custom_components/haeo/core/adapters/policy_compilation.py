@@ -7,18 +7,17 @@ Implements the full compilation pipeline:
 4. Reachability analysis — which connections need which VLANs
 5. Connection tagging — per-connection VLAN sets
 6. Node outbound tags — enforce source provenance
-7. Node inbound tags — default-allow with all active VLANs
+7. Node inbound tags — all active VLANs
 8. Pricing injection — per-VLAN sink-side minimum s-t cut placement as
    PolicyPricing model elements with reactive TrackedParam prices
 
-Default-allow model: unpolicied sources produce on tag 0 (the default tag).
-Policied sources are forced onto their VLAN by outbound_tags. All tags —
-including tag 0 — use the same directed reachability analysis, so a
-connection only carries the tags whose sources can actually reach it.
-Sink nodes accept all active VLANs plus tag 0, so both policied and
-unpolicied power can reach any sink. Costs are applied by PolicyPricing
-elements placed on the min-cut edges separating sources from policy-specific
-destinations.
+Every source-capable node receives a VLAN through signature merging.
+Policied sources get VLANs from their rule signatures; unpolicied sources
+share a single VLAN (the empty-signature group) with no pricing elements.
+The pricing loop only creates PolicyPricing elements for VLANs that appear
+in actual policy rules, so unpolicied VLANs carry zero policy cost without
+any special-casing. Sink nodes accept all active VLANs so every source can
+reach every sink.
 
 See docs/modeling/tagged-power.md for design rationale.
 See docs/developer-guide/vlan-optimization.md for optimization proofs.
@@ -38,9 +37,6 @@ from custom_components.haeo.core.model.elements.connection import ConnectionElem
 from custom_components.haeo.core.model.elements.node import NodeElementConfig
 from custom_components.haeo.core.model.elements.policy_pricing import ELEMENT_TYPE as MODEL_ELEMENT_TYPE_POLICY_PRICING
 from custom_components.haeo.core.model.elements.policy_pricing import PolicyPricingElementConfig, PolicyPricingTerm
-
-# Tag 0 is used for untagged/default power flows
-DEFAULT_TAG = 0
 
 # Non-connection element configs (nodes and batteries) that can carry tags
 _TaggableConfig = NodeElementConfig | BatteryElementConfig
@@ -154,25 +150,32 @@ def compile_policies(
     # sets but different prices fold together naturally. This keeps the
     # network structure stable across price changes — only PolicyPricing
     # TrackedParams update.
+    #
+    # Only nodes that act as sources need VLANs: either they're physically
+    # source-capable (in source_names) or they appear as sources in policy
+    # rules (in source_memberships). Non-source nodes don't generate power
+    # and participate only via inbound_tags.
+    relevant_sources = set(source_memberships.keys()) | source_names
     signatures: dict[str, frozenset[_RuleGrouping]] = {}
-    for name in names:
+    for name in relevant_sources:
         signatures[name] = frozenset(source_memberships.get(name, set()))
 
     # --- Step 3: VLAN assignment (signature merging) ---
+    # All signatures — including the empty signature shared by unpolicied
+    # sources — get a regular VLAN number. Unpolicied sources collapse to
+    # one VLAN through signature merging with no pricing elements, since
+    # they don't appear in any rule's source list.
     sig_to_vlan: dict[frozenset[_RuleGrouping], int] = {}
     vlan_counter = 1
     tag_map: dict[str, int] = {}
 
     for name, sig in signatures.items():
-        if not sig:
-            tag_map[name] = DEFAULT_TAG
-            continue
         if sig not in sig_to_vlan:
             sig_to_vlan[sig] = vlan_counter
             vlan_counter += 1
         tag_map[name] = sig_to_vlan[sig]
 
-    active_vlans = sorted({v for v in tag_map.values() if v != DEFAULT_TAG})
+    active_vlans = sorted(set(tag_map.values()))
 
     # --- Step 4: Reachability analysis ---
     # Tag membership follows source provenance: a tag covers every
@@ -190,16 +193,6 @@ def compile_policies(
     # destinations (step 8); non-destination sinks remain policy-free.
     tag_connections: dict[int, set[str]] = {}
 
-    # Default tag uses the same reachability as VLANs — unpolicied sources
-    # produce on tag 0, so only connections reachable from those sources
-    # carry the default tag. This avoids redundant LP variables on
-    # connections only reachable from policied sources.
-    default_tag_sources = {n for n in source_names if tag_map.get(n, DEFAULT_TAG) == DEFAULT_TAG}
-    if default_tag_sources:
-        tag_connections[DEFAULT_TAG] = _find_reachable_connections(
-            default_tag_sources, sink_names, directed_graph, absorb_at=sink_names
-        )
-
     for vlan_id in active_vlans:
         source_nodes = {n for n, v in tag_map.items() if v == vlan_id}
         tag_connections[vlan_id] = _find_reachable_connections(
@@ -208,33 +201,29 @@ def compile_policies(
 
     # --- Step 5: Connection tagging ---
     # Each connection carries only tags whose sources can reach it via
-    # directed paths. Falls back to DEFAULT_TAG for connections not on
-    # any source-to-sink path (should not occur in well-formed networks).
+    # directed paths. In a well-formed network every connection on a
+    # source-to-sink path receives at least one tag.
     for conn in connections:
         tags = {
             tag_id
             for tag_id, reachable in tag_connections.items()
             if conn["name"] in reachable
         }
-        conn["tags"] = tags or {DEFAULT_TAG}
+        conn["tags"] = tags
 
     # --- Step 6: Node outbound tags ---
-    # Policied sources produce on their VLAN. Unpolicied source-capable nodes
-    # produce on tag 0 only, preventing unnecessary production decomposition.
+    # Every source in the tag map gets outbound_tags forcing its production
+    # onto its assigned VLAN. Unpolicied and policied sources are treated
+    # uniformly — the difference is only whether pricing elements exist.
     for name, vlan_id in tag_map.items():
-        node = by_name[name]
-        if vlan_id != DEFAULT_TAG:
-            node["outbound_tags"] = {vlan_id}
-        elif name in source_names:
-            node["outbound_tags"] = {DEFAULT_TAG}
+        by_name[name]["outbound_tags"] = {vlan_id}
 
     # --- Step 7: Node inbound tags ---
-    # Default-allow: all sinks accept tag 0 (unpolicied power) plus all
-    # active policy VLANs. Policied sources reach sinks on their assigned
-    # VLAN via outbound_tags, not via DEFAULT_TAG.
+    # All sinks accept every active VLAN so both policied and unpolicied
+    # power can reach any sink.
     for name in sink_names:
         if name in by_name:
-            by_name[name]["inbound_tags"] = {DEFAULT_TAG} | set(active_vlans)
+            by_name[name]["inbound_tags"] = set(active_vlans)
 
     # --- Step 8: Pricing injection ---
     # For each VLAN participating in a rule, place the price on a minimum
@@ -272,17 +261,16 @@ def compile_policies(
 
         sources_by_vlan: dict[int, set[str]] = defaultdict(set)
         for src in sources:
-            vlan = tag_map.get(src, DEFAULT_TAG)
-            if vlan == DEFAULT_TAG:
+            if src not in tag_map:
                 continue
-            sources_by_vlan[vlan].add(src)
+            sources_by_vlan[tag_map[src]].add(src)
 
         rule_pricing_names: list[str] = []
         for source_vlan, vlan_sources in sorted(sources_by_vlan.items()):
             vlan_edges = [
                 (conn["source"], conn["target"], conn["name"])
                 for conn in connections
-                if source_vlan in conn.get("tags", {DEFAULT_TAG})
+                if source_vlan in conn.get("tags", set())
             ]
             cut = _min_cut_edges(vlan_sources, set(destinations), vlan_edges)
             if not cut:
