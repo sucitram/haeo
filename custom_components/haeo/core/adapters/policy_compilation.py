@@ -1,4 +1,9 @@
-"""Policy compilation: converts policy configs into tagged power flow constraints.
+"""Policy compilation: converts network elements into tagged power flow constraints.
+
+The compiler always runs, even when no policies are configured. This
+ensures the network structure (tags, outbound/inbound constraints) is
+consistent regardless of whether policies exist. Adding a policy to an
+unrelated element does not change how existing elements behave.
 
 Implements the full compilation pipeline:
 1. Flow enumeration — expand policies into (source, dest, price) tuples
@@ -91,9 +96,6 @@ def compile_policies(
         policy rule index to pricing element names.
 
     """
-    if not policy_configs:
-        return CompilationResult(elements=elements, pricing_rule_map={})
-
     # Partition by element type — connections have source/target fields
     connections: list[ConnectionElementConfig] = []
     non_connections: list[ModelElementConfig] = []
@@ -129,7 +131,6 @@ def compile_policies(
     # only in price, which TrackedParams handle reactively).
     rule_groupings: list[_RuleGrouping] = []
     source_memberships: dict[str, set[_RuleGrouping]] = defaultdict(set)
-    has_flows = False
     for policy in policy_configs:
         sources = _resolve_wildcard(_as_name_list(policy["sources"]), names, wildcard_set=source_names)
         destinations = _resolve_wildcard(_as_name_list(policy["destinations"]), names, wildcard_set=sink_names)
@@ -137,11 +138,7 @@ def compile_policies(
         rule_groupings.append(grouping)
         for src in sources:
             if any(dst != src for dst in destinations):
-                has_flows = True
                 source_memberships[src].add(grouping)
-
-    if not has_flows:
-        return CompilationResult(elements=elements, pricing_rule_map={})
 
     # --- Step 2: Signature computation ---
     # Signatures capture which rule groupings apply to each source. Sources
@@ -150,14 +147,8 @@ def compile_policies(
     # sets but different prices fold together naturally. This keeps the
     # network structure stable across price changes — only PolicyPricing
     # TrackedParams update.
-    #
-    # Only nodes that act as sources need VLANs: either they're physically
-    # source-capable (in source_names) or they appear as sources in policy
-    # rules (in source_memberships). Non-source nodes don't generate power
-    # and participate only via inbound_tags.
-    relevant_sources = set(source_memberships.keys()) | source_names
     signatures: dict[str, frozenset[_RuleGrouping]] = {}
-    for name in relevant_sources:
+    for name in source_names | set(source_memberships.keys()):
         signatures[name] = frozenset(source_memberships.get(name, set()))
 
     # --- Step 3: VLAN assignment (signature merging) ---
@@ -195,9 +186,18 @@ def compile_policies(
 
     for vlan_id in active_vlans:
         source_nodes = {n for n, v in tag_map.items() if v == vlan_id}
-        tag_connections[vlan_id] = _find_reachable_connections(
-            source_nodes, sink_names, directed_graph, absorb_at=sink_names
-        )
+        # Per-source reachability with union: each source's self-loop
+        # exclusion only blocks edges targeting that specific source.
+        # A single call with all source_nodes would exclude edges into
+        # ANY source, which breaks when multiple sources share a VLAN
+        # (e.g. Grid:export and Battery:charge become unreachable even
+        # though they're valid paths for other sources in the VLAN).
+        reachable: set[str] = set()
+        for src in source_nodes:
+            reachable |= _find_reachable_connections(
+                {src}, sink_names, directed_graph, absorb_at=sink_names
+            )
+        tag_connections[vlan_id] = reachable
 
     # --- Step 5: Connection tagging ---
     # Each connection carries only tags whose sources can reach it via
@@ -341,12 +341,11 @@ def _find_reachable_connections(
     back to the appropriate sources.
 
     Edges whose target lies in ``source_nodes`` are excluded from the
-    result: a VLAN represents power *originating* at its source, so
-    tagged flow must not re-enter that source.  Including such edges on
-    a storage element (battery that is both source and sink for its own
-    VLAN) creates a zero-cost self-loop — Battery:discharge → Inverter →
-    Battery:charge → Battery — that bypasses every downstream cut and
-    exposes arbitrage whenever an inbound edge pays an incentive.
+    result to prevent self-loops.  The caller invokes this function
+    per-source (one source at a time) and unions the results, so the
+    exclusion only blocks edges targeting that specific source — other
+    sources in the same VLAN can still reach those edges through their
+    own reachability calls.
 
     Stays linear in graph size and is stable on cyclic topologies.
     """

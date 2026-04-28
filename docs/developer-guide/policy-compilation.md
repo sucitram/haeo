@@ -65,10 +65,14 @@ The same mechanism powered a phantom charge/discharge arbitrage when a negative-
 Absorbing at sinks eliminates that degree of freedom entirely — the battery's outbound flow now always carries provenance from the battery's own VLAN, so wear (and any other battery-source policy) always applies.
 The VLAN's source nodes are exempt from absorption so a storage element's own VLAN can still expand outward from it normally.
 
-Reachability additionally excludes edges whose *target* is one of the VLAN's own source nodes.
-A VLAN represents power originating at its sources, so tagged flow must never re-enter its origin.
-For a battery (both a source and a sink of its own VLAN) this removes the `Battery:charge` edge from the battery VLAN: the zero-cost self-loop `Battery:discharge → Inverter → Battery:charge → Battery` is no longer expressible in the tagged graph.
-Without this exclusion the solver could use solar (or any other incoming VLAN) just to cover the round-trip efficiency loss of a battery self-cycle, funding it with the incoming charge incentive while the wear cost — placed on an outbound cut the loop never crosses — is completely avoided.
+Reachability additionally excludes edges whose *target* is a source node, using **per-source** analysis.
+Rather than computing reachability for all sources in a VLAN simultaneously — which would exclude edges into *any* source — the analysis runs separately for each source and unions the results.
+This way, each source's self-loop exclusion only blocks edges targeting that specific source, while other sources in the same VLAN can still reach those edges.
+
+For a battery (both a source and a sink of its own VLAN) this removes the `Battery:charge` edge from the battery's individual reachability: the zero-cost self-loop `Battery:discharge → Inverter → Battery:charge → Battery` is not reachable from Battery itself.
+When other sources share the VLAN (e.g. Solar in an unpolicied group), their reachability includes `Battery:charge` because Solar power can legitimately charge the battery.
+The theoretical self-loop through the shared VLAN is harmless because unpolicied VLANs have no pricing incentive for the solver to exploit.
+When Battery has its own unique VLAN (through a policy), only Battery's reachability applies and the charge edge is correctly excluded.
 
 ### Step 5: Connection tagging
 
